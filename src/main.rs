@@ -73,9 +73,6 @@ impl Pane {
         }
     }
 
-    fn reset_scroll(&mut self) {
-        self.scroll_offset = 0;
-    }
 }
 
 struct App {
