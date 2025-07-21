@@ -1,3 +1,4 @@
+use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -9,70 +10,80 @@ use ratatui::{
     style::{Color, Style},
     text::Line,
     widgets::{Block, Borders, Paragraph, Wrap},
-    Frame, Terminal,
+    Frame, Terminal as RatatuiTerminal,
 };
 use std::{
-    error::Error, 
     io,
-    process::Command,
-    time::{Duration, Instant},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
 };
 
+use tui_split::Terminal;
+
 struct Pane {
+    terminal: Terminal,
+    output_buffer: Arc<Mutex<Vec<String>>>,
     title: String,
-    command: String,
-    output: String,
-    last_update: Instant,
-    scroll_offset: u16,
 }
 
 impl Pane {
-    fn new(title: &str, command: &str) -> Self {
-        Self {
+    fn new(title: &str) -> Result<Self> {
+        let terminal = Terminal::new()?;
+        let output_buffer = Arc::new(Mutex::new(Vec::new()));
+        
+        Ok(Pane {
+            terminal,
+            output_buffer,
             title: title.to_string(),
-            command: command.to_string(),
-            output: String::new(),
-            last_update: Instant::now() - Duration::from_secs(60), // Force initial update
-            scroll_offset: 0,
-        }
+        })
     }
 
-    fn update(&mut self) {
-        // Update every 2 seconds
-        if self.last_update.elapsed() > Duration::from_secs(2) {
-            match Command::new("sh")
-                .arg("-c")
-                .arg(&self.command)
-                .output()
-            {
-                Ok(output) => {
-                    self.output = String::from_utf8_lossy(&output.stdout).to_string();
-                    if !output.stderr.is_empty() {
-                        self.output.push_str("\n--- STDERR ---\n");
-                        self.output.push_str(&String::from_utf8_lossy(&output.stderr));
+    fn start_reader(&mut self) -> Result<()> {
+        let buffer_clone = Arc::clone(&self.output_buffer);
+        
+        thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            let mut accumulated = String::new();
+            
+            loop {
+                // This is a simple version - in production, we'd use a proper terminal emulator
+                match std::io::Read::read(&mut std::io::stdin(), &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        accumulated.push_str(&text);
+                        
+                        // Simple line-based buffering
+                        if accumulated.contains('\n') {
+                            let lines: Vec<String> = accumulated.lines().map(String::from).collect();
+                            if let Ok(mut buffer) = buffer_clone.lock() {
+                                buffer.extend(lines);
+                                // Keep only last 100 lines
+                                if buffer.len() > 100 {
+                                    let drain_count = buffer.len() - 100;
+                                    buffer.drain(0..drain_count);
+                                }
+                            }
+                            accumulated.clear();
+                        }
                     }
-                }
-                Err(e) => {
-                    self.output = format!("Error executing command: {}", e);
+                    Err(_) => break,
                 }
             }
-            self.last_update = Instant::now();
-        }
+        });
+        
+        Ok(())
     }
 
-    fn scroll_up(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
-        }
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.terminal.write(data)?;
+        Ok(())
     }
 
-    fn scroll_down(&mut self) {
-        let line_count = self.output.lines().count() as u16;
-        if self.scroll_offset < line_count.saturating_sub(1) {
-            self.scroll_offset += 1;
-        }
+    fn get_output(&self) -> Vec<String> {
+        self.output_buffer.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
-
 }
 
 struct App {
@@ -82,21 +93,15 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
+    fn new() -> Result<Self> {
+        Ok(Self {
             panes: vec![
-                Pane::new("System Info", "date && echo && uname -a && echo && uptime"),
-                Pane::new("Process List", "ps aux | head -20"),
+                Pane::new("Terminal 1")?,
+                Pane::new("Terminal 2")?,
             ],
             split_horizontal: false,
             focused_pane: 0,
-        }
-    }
-
-    fn update(&mut self) {
-        for pane in &mut self.panes {
-            pane.update();
-        }
+        })
     }
 
     fn switch_focus(&mut self) {
@@ -104,16 +109,16 @@ impl App {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = RatatuiTerminal::new(backend)?;
 
     // Application state
-    let mut app = App::new();
+    let mut app = App::new()?;
 
     let res = run_app(&mut terminal, &mut app);
 
@@ -134,11 +139,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_app<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
+    terminal: &mut RatatuiTerminal<B>,
     app: &mut App,
 ) -> io::Result<()> {
+    // Start simple - just display output
     loop {
-        app.update();
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -148,23 +153,12 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('h') => app.split_horizontal = true,
                     KeyCode::Char('v') => app.split_horizontal = false,
                     KeyCode::Tab => app.switch_focus(),
-                    KeyCode::Up => {
-                        app.panes[app.focused_pane].scroll_up();
+                    KeyCode::Char(c) => {
+                        // Send character to focused terminal
+                        let _ = app.panes[app.focused_pane].write(&[c as u8]);
                     }
-                    KeyCode::Down => {
-                        app.panes[app.focused_pane].scroll_down();
-                    }
-                    KeyCode::Char('1') => {
-                        app.panes[0] = Pane::new("Disk Usage", "df -h");
-                    }
-                    KeyCode::Char('2') => {
-                        app.panes[1] = Pane::new("Network Info", "ifconfig");
-                    }
-                    KeyCode::Char('3') => {
-                        app.panes[0] = Pane::new("Memory Info", "free -h");
-                    }
-                    KeyCode::Char('4') => {
-                        app.panes[1] = Pane::new("CPU Info", "lscpu");
+                    KeyCode::Enter => {
+                        let _ = app.panes[app.focused_pane].write(b"\n");
                     }
                     _ => {}
                 }
@@ -193,9 +187,8 @@ fn ui(f: &mut Frame, app: &App) {
         let is_focused = i == app.focused_pane;
         
         let block = Block::default()
-            .title(format!("{} | Command: {} {}", 
-                pane.title, 
-                pane.command,
+            .title(format!("{} {}", 
+                pane.title,
                 if is_focused { "[FOCUSED]" } else { "" }
             ))
             .borders(Borders::ALL)
@@ -203,13 +196,15 @@ fn ui(f: &mut Frame, app: &App) {
                 if is_focused { Color::Cyan } else { Color::White }
             ));
 
-        let lines: Vec<Line> = pane.output
-            .lines()
-            .skip(pane.scroll_offset as usize)
-            .map(|line| Line::from(line.to_string()))
-            .collect();
+        // For now, show a simple message
+        let text = vec![
+            Line::from("ZSH Terminal"),
+            Line::from(""),
+            Line::from("Note: Full terminal emulation requires additional work."),
+            Line::from("This is a simplified version for demonstration."),
+        ];
 
-        let paragraph = Paragraph::new(lines)
+        let paragraph = Paragraph::new(text)
             .block(block)
             .style(Style::default().fg(if i == 0 { Color::Green } else { Color::Yellow }))
             .wrap(Wrap { trim: true });
@@ -219,8 +214,8 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Instructions
     let help_text = vec![
-        Line::from("q: Quit | v: Vertical | h: Horizontal | Tab: Switch focus | ↑↓: Scroll"),
-        Line::from("1: Disk Usage | 2: Network | 3: Memory | 4: CPU Info"),
+        Line::from("q: Quit | v: Vertical | h: Horizontal | Tab: Switch focus"),
+        Line::from("Note: Full terminal emulation with ANSI escape sequences is complex"),
     ];
     let help = Paragraph::new(help_text)
         .style(Style::default().fg(Color::Gray));

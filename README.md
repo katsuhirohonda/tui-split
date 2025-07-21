@@ -1,16 +1,29 @@
 # tui-split
 
-A simple terminal UI tool for split-screen layouts built with Rust and ratatui. Each pane can run different shell commands and display their output.
+A terminal UI tool for split-screen layouts built with Rust and ratatui, following TDD principles.
 
 ## Features
 - Vertical and horizontal split layouts
-- Run shell commands in each pane
-- Auto-refresh command output every 2 seconds
+- PTY (Pseudo-Terminal) support for running real shells (zsh)
 - Switch focus between panes
-- Scroll through command output
-- Change commands on the fly
+- Test-Driven Development approach
 
-## Usage
+## Architecture
+- `lib.rs` - Terminal PTY wrapper with tests
+- `main.rs` - TUI application using ratatui
+
+## Development
+This project follows t-wada's TDD principles:
+1. Red: Write failing tests first
+2. Green: Write minimal code to pass tests
+3. Refactor: Improve code while keeping tests green
+
+### Running Tests
+```
+cargo test
+```
+
+### Running the Application
 ```
 cargo run
 ```
@@ -20,12 +33,15 @@ cargo run
 - `v` - Vertical split
 - `h` - Horizontal split
 - `Tab` - Switch focus between panes
-- `↑/↓` - Scroll up/down in focused pane
-- `1` - Change pane 1 to disk usage
-- `2` - Change pane 2 to network info
-- `3` - Change pane 1 to memory info
-- `4` - Change pane 2 to CPU info
 
-## Default Commands
-- Pane 1: System information (date, uname, uptime)
-- Pane 2: Process list (ps aux)
+## Current Status
+- ✅ Basic PTY implementation with zsh
+- ✅ TDD test suite
+- ⚠️ Full terminal emulation (ANSI escape sequences) is not yet implemented
+- ⚠️ The UI currently shows placeholder text instead of actual terminal output
+
+## Future Work
+- Implement proper terminal emulation (vt100/xterm)
+- Handle ANSI escape sequences
+- Add scrollback buffer
+- Support for more shells (bash, fish, etc.)
